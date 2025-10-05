@@ -1,1 +1,1 @@
-worker: python Chirie02.py
+worker: python Chirie.py
