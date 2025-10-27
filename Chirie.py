@@ -8,27 +8,50 @@ import threading
 
 # === CONFIG ===
 BOT_TOKEN = "7841140498:AAEgOzcYSUj6L974d043_g_eV2n8pGon1sA"   # <-- Token de la BotFather
-MY_CHAT_ID = 1104625656                # <-- Chat ID-ul tău (de la @userinfobot)
+MY_CHAT_ID = 1104625656                                         # <-- Chat ID (ex. de la @userinfobot)
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Filtre
 BASE_URL = "https://www.kleinanzeigen.de/s-vermietungen/c203"
+INTERVAL = 180          # secunde între verificări
+MAX_RENT = 900          # limita de chirie (euro)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-INTERVAL = 180  # secunde între verificări
-MAX_RENT = 1000
 
-# Zone ~50km în jur de Rüsselsheim am Main
-ZONE_APPROX_50KM = [
-    "Rüsselsheim", "Mainz", "Frankfurt", "Wiesbaden", "Darmstadt",
-    "Offenbach", "Hanau", "Aschaffenburg", "Bensheim", "Gernsheim",
-    "Heppenheim", "Groß-Gerau", "Kelsterbach", "Raunheim", "Mörfelden"
+# === Zone ~30 km în jur de Rüsselsheim am Main ===
+ZONE_APPROX_30KM = [
+    "Rüsselsheim", "Mainz", "Wiesbaden", "Frankfurt am Main", "Darmstadt",
+    "Offenbach am Main", "Groß-Gerau", "Raunheim", "Kelsterbach",
+    "Flörsheim am Main", "Hochheim am Main", "Trebur", "Nauheim",
+    "Bischofsheim", "Mörfelden-Walldorf", "Griesheim", "Ginsheim-Gustavsburg",
+    "Riedstadt", "Kriftel", "Hattersheim am Main", "Eschborn",
+    "Hofheim am Taunus", "Langen", "Egelsbach", "Weiterstadt",
+    "Eppstein", "Dietzenbach", "Neu-Isenburg", "Erzhausen",
+    "Stockstadt am Rhein", "Biebesheim am Rhein", "Büttelborn",
+    "Pfungstadt", "Heusenstamm", "Seeheim-Jugenheim", "Kelkheim",
+    "Oberursel", "Bad Soden", "Sulzbach am Taunus", "Wehrheim"
 ]
 
 DB_FILE = "kleinanzeigen_rent.db"
 session = requests.Session()
-session.headers.update({"User-Agent": USER_AGENT})
+session.headers.update({
+    "User-Agent": USER_AGENT,
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.kleinanzeigen.de/",
+    "Connection": "keep-alive"
+})
+
+# === THREAD-SAFE DB ===
+db_lock = threading.Lock()
+
+def with_db_lock(func):
+    def wrapper(*args, **kwargs):
+        with db_lock:
+            return func(*args, **kwargs)
+    return wrapper
+
 
 # === Baza de date ===
+@with_db_lock
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -46,6 +69,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+@with_db_lock
 def add_user(chat_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -53,6 +77,7 @@ def add_user(chat_id):
     conn.commit()
     conn.close()
 
+@with_db_lock
 def get_users():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -61,6 +86,7 @@ def get_users():
     conn.close()
     return users
 
+@with_db_lock
 def is_seen(ad_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -69,6 +95,7 @@ def is_seen(ad_id):
     conn.close()
     return result
 
+@with_db_lock
 def mark_seen(ad):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -78,14 +105,15 @@ def mark_seen(ad):
     conn.commit()
     conn.close()
 
-# === Scraping ===
+
+# === SCRAPING ===
 def fetch_listings():
     try:
-        r = session.get(BASE_URL, timeout=20)
+        r = session.get(BASE_URL, timeout=30)
         r.raise_for_status()
         return r.text
     except Exception as e:
-        print("Eroare la fetch:", e)
+        print("[Eroare FETCH]:", e)
         return None
 
 def parse_ads(html):
@@ -98,7 +126,7 @@ def parse_ads(html):
             continue
 
         title_tag = item.select_one("h2, h2 a, .aditem-main--middle--title a")
-        title = title_tag.get_text(strip=True) if title_tag else "(fara titlu)"
+        title = title_tag.get_text(strip=True) if title_tag else "(fără titlu)"
 
         link_tag = None
         for a in item.find_all("a", href=True):
@@ -131,7 +159,8 @@ def parse_ads(html):
         })
     return ads
 
-# === Trimite mesaje catre toti utilizatorii ===
+
+# === Trimite mesaje ===
 def send_to_all(message):
     users = get_users()
     for chat_id in users:
@@ -139,62 +168,76 @@ def send_to_all(message):
             bot.send_message(chat_id, message)
             time.sleep(0.5)
         except Exception as e:
-            print("Eroare trimitere Telegram:", e)
+            print("[Eroare trimitere Telegram]:", e)
 
-# === Handlere Telegram ===
+
+# === Comenzi Telegram ===
 @bot.message_handler(commands=['start'])
 def start(message):
     add_user(message.chat.id)
-    bot.send_message(message.chat.id, "Salut! Vei primi anunturi noi cu chirii (pana la 1000€) in jurul Rüsselsheim (~50 km).")
+    bot.send_message(message.chat.id, "👋 Salut! Vei primi anunțuri noi cu chirii (până la 900 €) în jurul Rüsselsheim (~30 km).")
 
 @bot.message_handler(commands=['latest'])
 def latest(message):
     html = fetch_listings()
     if not html:
-        bot.send_message(message.chat.id, "Eroare la fetch.")
+        bot.send_message(message.chat.id, "⚠️ Eroare la descărcarea paginii.")
         return
+
     ads = parse_ads(html)
     msg_count = 0
     for ad in ads[:10]:
-        if any(zone.lower() in ad["location"].lower() for zone in ZONE_APPROX_50KM):
+        if any(zone.lower() in ad["location"].lower() for zone in ZONE_APPROX_30KM):
             if ad["price_value"] is not None and ad["price_value"] <= MAX_RENT:
-                bot.send_message(message.chat.id,
-                                 f"🏠 {ad['title']}\n💶 {ad['price']}\n📍 {ad['location']}\n🔗 {ad['url']}")
+                bot.send_message(
+                    message.chat.id,
+                    f"🏠 {ad['title']}\n💶 {ad['price']}\n📍 {ad['location']}\n🔗 {ad['url']}"
+                )
                 msg_count += 1
     if msg_count == 0:
-        bot.send_message(message.chat.id, "Nu am gasit momentan chirii in zona ta sub 1000€.")
+        bot.send_message(message.chat.id, "❌ Nu am găsit momentan chirii sub 900 € în zona ta.")
 
-# === Main scraping loop ===
+
+# === LOOP SCRAPING ===
 def scrape_loop():
     while True:
         html = fetch_listings()
         if not html:
             time.sleep(INTERVAL)
             continue
+
         ads = parse_ads(html)
         new_count = 0
         for ad in ads:
-            if any(zone.lower() in ad["location"].lower() for zone in ZONE_APPROX_50KM):
+            if any(zone.lower() in ad["location"].lower() for zone in ZONE_APPROX_30KM):
                 if ad["price_value"] is not None and ad["price_value"] <= MAX_RENT:
                     if not is_seen(ad["id"]):
                         msg = f"🏠 {ad['title']}\n💶 {ad['price']}\n📍 {ad['location']}\n🔗 {ad['url']}"
                         send_to_all(msg)
                         mark_seen(ad)
                         new_count += 1
-        print(f"Verificat: {len(ads)} anunturi — noi trimise: {new_count}")
+        print(f"[{time.strftime('%H:%M:%S')}] Verificat: {len(ads)} anunțuri — noi trimise: {new_count}")
         time.sleep(INTERVAL)
 
-# === START ===
+
+# === MAIN ===
 if __name__ == "__main__":
     init_db()
-    print("Botul de chirii pornit.")
+    print("✅ Botul de chirii pornit.")
 
     try:
-        bot.send_message(MY_CHAT_ID, "🏠 Bot de chirii pornit! Voi trimite anunturile noi sub 1000€ din zona Rüsselsheim (~50 km).")
+        bot.send_message(MY_CHAT_ID, "🏠 Botul de chirii a pornit! Voi trimite automat anunțurile sub 900 € din zona Rüsselsheim (~30 km).")
     except Exception as e:
-        print("Nu s-a putut trimite mesajul Telegram:", e)
+        print("[Avertisment] Nu s-a putut trimite mesajul de start:", e)
 
+    # thread separat pentru scraping
     t = threading.Thread(target=scrape_loop, daemon=True)
     t.start()
 
-    bot.polling(none_stop=True)
+    # Polling cu reconectare automată
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=5, timeout=60)
+        except Exception as e:
+            print("[Eroare la polling] Se reîncearcă în 10 secunde:", e)
+            time.sleep(10)
